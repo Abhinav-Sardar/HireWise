@@ -10,7 +10,7 @@ export async function POST(req) {
       messages: [
         {
           role: "system",
-          content: `You are an elite, brutally honest technical recruiter for HireWise. 
+          content: `You are an elite,  honest technical recruiter for HireWise. 
           Analyze the provided resume data against the target job role and expected salary.
           Do NOT sugarcoat. If the salary expectation is too high for their skills, call them out.
           Provide a JSON response with exactly this structure:

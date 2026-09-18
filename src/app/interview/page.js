@@ -1,35 +1,46 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
+
 import Script from "next/script";
 import {
-  AlertTriangle,
-  Video,
   Mic,
   MicOff,
+  Video,
+  PhoneOff,
+  Pause,
+  Settings,
   Clock,
-  SkipForward,
+  AlertTriangle,
+  MessageSquare,
   CheckCircle,
 } from "lucide-react";
+import { HWLogo } from "../components/Sidebar";
 
 export default function InterviewPage() {
-  const [interviewState, setInterviewState] = useState("setup"); // 'setup', 'active', 'summary'
-  const [durationLimit, setDurationLimit] = useState(5); // in minutes
+  const [interviewState, setInterviewState] = useState("setup");
+  const [durationLimit, setDurationLimit] = useState(10);
 
-  // Timers
   const [overallTimeLeft, setOverallTimeLeft] = useState(0);
   const [questionTimeLeft, setQuestionTimeLeft] = useState(30);
+  const [questionCount, setQuestionCount] = useState(1);
 
-  // System State
   const [isActive, setIsActive] = useState(false);
   const [scriptsLoaded, setScriptsLoaded] = useState({
     face: false,
     pose: false,
   });
+
   const [gazeAlert, setGazeAlert] = useState(false);
   const [postureAlert, setPostureAlert] = useState(false);
+  const gazeViolationSeconds = useRef(0);
+  const postureViolationSeconds = useRef(0);
 
-  // Chat & Speech
   const [chatLog, setChatLog] = useState([]);
+  const [liveTranscript, setLiveTranscript] = useState("");
+  const [fillerWordCount, setFillerWordCount] = useState(0);
+  const [wpm, setWpm] = useState(0);
+  const [avgDelay, setAvgDelay] = useState(0);
+
   const [isListening, setIsListening] = useState(false);
   const [isAiThinking, setIsAiThinking] = useState(false);
   const [summaryData, setSummaryData] = useState(null);
@@ -37,14 +48,16 @@ export default function InterviewPage() {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const requestRef = useRef(null);
-  const chatScrollContainerRef = useRef(null);
   const recognitionRef = useRef(null);
   const faceMeshRef = useRef(null);
   const poseRef = useRef(null);
+  const chatScrollContainerRef = useRef(null);
 
   const chatLogRef = useRef(chatLog);
+  const startTimeRef = useRef(Date.now());
+  const miaFinishedTimeRef = useRef(null);
+  const speechDelaysRef = useRef([]);
 
-  // Sync refs and scrolling
   useEffect(() => {
     chatLogRef.current = chatLog;
     if (chatScrollContainerRef.current) {
@@ -53,23 +66,28 @@ export default function InterviewPage() {
         behavior: "smooth",
       });
     }
-  }, [chatLog, isAiThinking]);
+  }, [chatLog, liveTranscript, isAiThinking]);
 
-  // Overall Session Timer
   useEffect(() => {
     let interval = null;
     if (interviewState === "active" && overallTimeLeft > 0) {
-      interval = setInterval(
-        () => setOverallTimeLeft((prev) => prev - 1),
-        1000,
-      );
+      interval = setInterval(() => {
+        setOverallTimeLeft((prev) => prev - 1);
+        if (gazeAlert) gazeViolationSeconds.current += 1;
+        if (postureAlert) postureViolationSeconds.current += 1;
+
+        const elapsedMinutes = (Date.now() - startTimeRef.current) / 60000;
+        const totalWords = chatLogRef.current
+          .filter((m) => m.sender === "You")
+          .reduce((acc, curr) => acc + curr.text.split(" ").length, 0);
+        if (elapsedMinutes > 0) setWpm(Math.round(totalWords / elapsedMinutes));
+      }, 1000);
     } else if (interviewState === "active" && overallTimeLeft <= 0) {
       endInterview();
     }
     return () => clearInterval(interval);
-  }, [interviewState, overallTimeLeft]);
+  }, [interviewState, overallTimeLeft, gazeAlert, postureAlert]);
 
-  // Rapid-Fire Question Timer (30s)
   useEffect(() => {
     let interval = null;
     if (interviewState === "active" && isListening && questionTimeLeft > 0) {
@@ -82,34 +100,54 @@ export default function InterviewPage() {
       isListening &&
       questionTimeLeft <= 0
     ) {
-      handleSkip("Time expired.");
+      handleSendMessage(liveTranscript || "[Time Expired]", chatLogRef.current);
     }
     return () => clearInterval(interval);
-  }, [interviewState, isListening, questionTimeLeft]);
+  }, [interviewState, isListening, questionTimeLeft, liveTranscript]);
 
-  // Speech Recognition Setup
   useEffect(() => {
     if (typeof window !== "undefined" && "webkitSpeechRecognition" in window) {
       const SpeechRecognition = window.webkitSpeechRecognition;
       const recognition = new SpeechRecognition();
       recognition.continuous = true;
-      recognition.interimResults = false;
-      recognition.lang = "en-US";
+      recognition.interimResults = true;
 
-      recognition.onresult = async (event) => {
-        const transcript =
-          event.results[event.results.length - 1][0].transcript;
-        if (transcript.trim()) {
-          await handleSendMessage(transcript, chatLogRef.current);
+      recognition.onresult = (event) => {
+        if (miaFinishedTimeRef.current) {
+          const delay = (Date.now() - miaFinishedTimeRef.current) / 1000;
+          speechDelaysRef.current.push(delay);
+          const avg =
+            speechDelaysRef.current.reduce((a, b) => a + b, 0) /
+            speechDelaysRef.current.length;
+          setAvgDelay(avg);
+          miaFinishedTimeRef.current = null;
+        }
+
+        let interim = "";
+        let final = "";
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) final += event.results[i][0].transcript;
+          else interim += event.results[i][0].transcript;
+        }
+
+        if (interim) {
+          setLiveTranscript(interim);
+          const fillers = (interim.match(/\b(um|uh|like|basically)\b/gi) || [])
+            .length;
+          if (fillers > 0) setFillerWordCount((prev) => prev + fillers);
+        }
+
+        if (final.trim()) {
+          setLiveTranscript("");
+          handleSendMessage(final, chatLogRef.current);
         }
       };
-      recognition.onerror = (event) => {
-        if (event.error !== "aborted") setIsListening(false);
+      recognition.onerror = (e) => {
+        if (e.error !== "aborted") setIsListening(false);
       };
       recognition.onend = () => setIsListening(false);
       recognitionRef.current = recognition;
     }
-
     return () => {
       try {
         recognitionRef.current?.stop();
@@ -117,31 +155,32 @@ export default function InterviewPage() {
     };
   }, []);
 
-  // Audio Control & Female Voice Selection
   const speakText = (text) => {
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
-
-    // Robust female voice targeting
     const voices = window.speechSynthesis.getVoices();
     const femaleVoice = voices.find(
       (v) =>
         v.name.match(/female/i) ||
         v.name.includes("Zira") ||
-        v.name.includes("Samantha") ||
-        v.name.includes("Victoria"),
+        v.name.includes("Samantha"),
     );
-    if (femaleVoice) utterance.voice = femaleVoice;
+    if (femaleVoice) {
+      utterance.voice = femaleVoice;
+      utterance.pitch = 1.1;
+    }
 
     utterance.onstart = () => {
       setIsListening(false);
-      setQuestionTimeLeft(30); // Reset 30s timer when Mia starts talking
+      setQuestionTimeLeft(30);
+      miaFinishedTimeRef.current = null;
       try {
         recognitionRef.current?.stop();
       } catch (e) {}
     };
     utterance.onend = () => {
       setIsListening(true);
+      miaFinishedTimeRef.current = Date.now();
       try {
         recognitionRef.current?.start();
       } catch (e) {}
@@ -149,15 +188,15 @@ export default function InterviewPage() {
     window.speechSynthesis.speak(utterance);
   };
 
-  // Interview Lifecycle Functions
   const startInterview = () => {
     setInterviewState("active");
     setIsActive(true);
     setOverallTimeLeft(durationLimit * 60);
     setQuestionTimeLeft(30);
+    startTimeRef.current = Date.now();
 
     const initMsg =
-      "Hi, let's start your Software Engineering mock interview. You have 30 seconds per question. To begin: What is the time complexity of looking up a value in a standard Hash Map, and in what specific scenario does that complexity degrade to O(N)?";
+      "Hi, let's start your SWE technical screen. You have 30 seconds per question. To start: Tell me about a challenging project you worked on and how you handled the database architecture.";
     setChatLog([{ sender: "Mia", text: initMsg }]);
     speakText(initMsg);
   };
@@ -170,11 +209,16 @@ export default function InterviewPage() {
     try {
       recognitionRef.current?.stop();
     } catch (e) {}
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-    }
+    if (streamRef.current)
+      streamRef.current.getTracks().forEach((t) => t.stop());
 
-    // Trigger Summary Generation
+    const currentMetrics = {
+      fillerWords: fillerWordCount,
+      averageSpeechDelaySeconds: avgDelay.toFixed(2),
+      gazeViolationsSeconds: gazeViolationSeconds.current,
+      postureViolationsSeconds: postureViolationSeconds.current,
+    };
+
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -182,33 +226,25 @@ export default function InterviewPage() {
         body: JSON.stringify({
           history: chatLogRef.current,
           mode: "summarize",
+          metrics: currentMetrics,
         }),
       });
       const data = await res.json();
-      setSummaryData(data.response);
+      setSummaryData(data);
     } catch (err) {
-      setSummaryData("Failed to generate summary report.");
+      setSummaryData({ realityCheck: "Grading failed. Check API logs." });
     }
   };
 
-  const handleSkip = async (reason = "User skipped.") => {
-    setQuestionTimeLeft(30);
-    const skipMsg = `[SYSTEM: ${reason} Provide the correct answer briefly and immediately ask the next question.]`;
-    await handleSendMessage(skipMsg, chatLogRef.current, true);
-  };
-
-  const handleSendMessage = async (
-    userText,
-    currentHistory,
-    isSystem = false,
-  ) => {
+  const handleSendMessage = async (userText, currentHistory) => {
     if (!userText.trim()) return;
+    setLiveTranscript("");
 
-    const displayMsg = isSystem ? "*(Skipped)*" : userText;
-    const updatedLog = [...currentHistory, { sender: "You", text: displayMsg }];
+    const updatedLog = [...currentHistory, { sender: "You", text: userText }];
     setChatLog(updatedLog);
     setIsAiThinking(true);
     setIsListening(false);
+    setQuestionCount((prev) => prev + 1);
     try {
       recognitionRef.current?.stop();
     } catch (e) {}
@@ -223,7 +259,7 @@ export default function InterviewPage() {
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed response");
+      if (!res.ok) throw new Error(data.error);
 
       setChatLog([...updatedLog, { sender: "Mia", text: data.response }]);
       speakText(data.response);
@@ -237,7 +273,6 @@ export default function InterviewPage() {
     }
   };
 
-  // Vision Tracker Pipeline
   useEffect(() => {
     if (!isActive || !scriptsLoaded.face || !scriptsLoaded.pose) return;
     let isMounted = true;
@@ -316,20 +351,18 @@ export default function InterviewPage() {
     return () => {
       isMounted = false;
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
-      if (streamRef.current) {
+      if (streamRef.current)
         streamRef.current.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
-      }
       if (faceMeshRef.current) faceMeshRef.current.close();
       if (poseRef.current) poseRef.current.close();
     };
   }, [isActive, scriptsLoaded]);
 
-  const allScriptsLoaded = scriptsLoaded.face && scriptsLoaded.pose;
   const formatTime = (secs) =>
     `${Math.floor(secs / 60)
       .toString()
       .padStart(2, "0")}:${(secs % 60).toString().padStart(2, "0")}`;
+  const allScriptsLoaded = scriptsLoaded.face && scriptsLoaded.pose;
 
   return (
     <>
@@ -344,165 +377,221 @@ export default function InterviewPage() {
         onLoad={() => setScriptsLoaded((prev) => ({ ...prev, pose: true }))}
       />
 
-      <div className="h-[calc(100vh-4rem)] flex flex-col overflow-hidden text-white bg-[#0F111A]">
-        {/* Header Bar */}
-        <div className="flex justify-between items-center pb-4 border-b border-gray-800 shrink-0 px-8 pt-6">
-          <div>
-            <h1 className="text-2xl font-bold">HireWise SWE Interview</h1>
-            <p className="text-xs text-[#9CA3AF]">
-              Software Engineering Assessment
-            </p>
-          </div>
-          {interviewState === "active" && (
-            <div className="flex items-center gap-6">
-              <div className="text-right">
-                <p className="text-xs text-gray-400">Total Time Remaining</p>
-                <p className="font-mono text-xl text-[#8B5CF6] font-bold">
-                  {formatTime(overallTimeLeft)}
-                </p>
-              </div>
-              <button
-                onClick={endInterview}
-                className="px-5 py-2.5 rounded-lg font-semibold bg-red-500 hover:bg-red-600 shadow-md"
-              >
-                End Early
-              </button>
+      <div className="min-h-screen bg-[#0F111A] text-white flex flex-col font-sans">
+        {/* Integrated Logo Header */}
+        <header className="flex justify-between items-center px-8 py-4 border-b border-gray-800 shrink-0">
+          <div className="flex items-center gap-4">
+            <div className="bg-[#1A1D27] p-2 rounded-xl border border-gray-800 shadow-md">
+              <HWLogo className="w-6 h-6" />
             </div>
-          )}
-        </div>
+            <h1 className="text-xl font-bold tracking-tight">
+              Active Interview Dashboard
+            </h1>
+          </div>
+          <div className="flex items-center gap-2 bg-[#1A1D27] px-4 py-2 rounded-full border border-gray-800">
+            <span className="text-sm font-medium text-[#8B5CF6]">
+              SWE Technical Screen
+            </span>
+          </div>
+        </header>
 
-        <div className="flex-1 overflow-hidden px-8 pb-8 pt-4">
-          {/* SETUP STATE */}
+        <div className="flex-1 p-8 overflow-hidden flex flex-col">
           {interviewState === "setup" && (
             <div className="h-full flex flex-col items-center justify-center max-w-xl mx-auto text-center space-y-8">
               <div className="w-20 h-20 bg-[#8B5CF6]/20 rounded-full flex items-center justify-center text-[#8B5CF6] mb-4">
                 <Clock size={40} />
               </div>
               <h2 className="text-3xl font-bold">Configure Your Session</h2>
-              <p className="text-[#9CA3AF]">
-                Select your target interview duration. You will have exactly 30
-                seconds to answer each technical question before time expires.
-              </p>
-
               <div className="grid grid-cols-3 gap-4 w-full">
                 {[5, 10, 15].map((min) => (
                   <button
                     key={min}
                     onClick={() => setDurationLimit(min)}
-                    className={`py-4 rounded-xl border-2 transition-all font-bold ${durationLimit === min ? "border-[#8B5CF6] bg-[#8B5CF6]/10 text-[#8B5CF6]" : "border-gray-800 bg-[#1A1D27] text-gray-400 hover:border-gray-600"}`}
+                    className={`py-4 rounded-xl border-2 transition-all font-bold ${durationLimit === min ? "border-[#8B5CF6] bg-[#8B5CF6]/10 text-[#8B5CF6]" : "border-gray-800 bg-[#1A1D27] text-gray-400"}`}
                   >
-                    {min} Minutes
+                    {min} Min
                   </button>
                 ))}
               </div>
-
               <button
                 onClick={startInterview}
                 disabled={!allScriptsLoaded}
-                className={`w-full py-4 rounded-xl font-bold text-lg transition-all ${!allScriptsLoaded ? "bg-gray-800 text-gray-500 cursor-not-allowed" : "bg-[#8B5CF6] hover:bg-[#7C3AED] shadow-[0_0_20px_rgba(139,92,246,0.3)]"}`}
+                className="w-full py-4 rounded-xl font-bold text-lg bg-[#8B5CF6] hover:bg-[#7C3AED] shadow-[0_0_20px_rgba(139,92,246,0.3)] disabled:opacity-50"
               >
-                {!allScriptsLoaded
-                  ? "Loading Vision Models..."
-                  : "Start Technical Screen"}
+                Start Technical Screen
               </button>
             </div>
           )}
 
-          {/* ACTIVE INTERVIEW STATE */}
           {interviewState === "active" && (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-full min-h-0">
-              {/* Video Feed */}
-              <div className="bg-[#1A1D27] rounded-xl border border-gray-800 p-4 flex flex-col min-h-0">
-                <div className="flex-1 bg-black rounded-lg relative overflow-hidden flex items-center justify-center">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-full flex-1 min-h-0">
+              {/* Column 1: Video */}
+              <div className="lg:col-span-4 bg-[#1A1D27] rounded-xl border border-gray-800 p-4 flex flex-col h-full min-h-0">
+                <div className="flex-1 bg-black rounded-lg relative overflow-hidden flex items-center justify-center mb-6">
                   <video
                     ref={videoRef}
-                    className="w-full h-full object-contain rounded-lg transform scale-x-[-1]"
+                    className="w-full h-full object-cover rounded-lg transform scale-x-[-1]"
                     playsInline
                     muted
                   />
                   <div className="absolute top-4 left-4 flex flex-col gap-2 z-10">
                     {gazeAlert && (
-                      <div className="bg-red-500/90 text-white px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-2 border border-red-400">
-                        <AlertTriangle size={15} /> Eye contact lost!
+                      <div className="bg-red-500/90 text-white px-3 py-1.5 rounded-md text-xs font-bold flex items-center gap-2">
+                        <AlertTriangle size={15} /> Eye contact lost
                       </div>
                     )}
                     {postureAlert && (
-                      <div className="bg-amber-500/90 text-white px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-2 border border-amber-400">
-                        <AlertTriangle size={15} /> Slouching detected
+                      <div className="bg-amber-500/90 text-white px-3 py-1.5 rounded-md text-xs font-bold flex items-center gap-2">
+                        <AlertTriangle size={15} /> Slouching
                       </div>
                     )}
                   </div>
                 </div>
+                <div className="flex justify-center gap-4 shrink-0">
+                  <button
+                    className={`w-12 h-12 rounded-full flex items-center justify-center ${isListening ? "bg-[#8B5CF6]" : "bg-gray-800"}`}
+                  >
+                    {isListening ? (
+                      <Mic size={20} className="text-white" />
+                    ) : (
+                      <MicOff size={20} className="text-gray-400" />
+                    )}
+                  </button>
+                  <button
+                    onClick={endInterview}
+                    className="w-12 h-12 rounded-full bg-red-500 flex items-center justify-center hover:bg-red-600"
+                  >
+                    <PhoneOff size={20} className="text-white" />
+                  </button>
+                </div>
               </div>
 
-              {/* Chat & Controls */}
-              <div className="bg-[#1A1D27] rounded-xl border border-gray-800 p-5 flex flex-col h-full min-h-0">
-                <div className="flex justify-between items-center border-b border-gray-800 pb-3">
-                  <h2 className="font-bold text-[#8B5CF6]">Interviewer: Mia</h2>
-                  <div className="flex items-center gap-2 text-sm font-mono">
+              {/* Column 2: Split Chat & Transcript */}
+              <div className="lg:col-span-5 flex flex-col gap-6 h-full min-h-0">
+                <div className="bg-[#1A1D27] rounded-xl border border-gray-800 p-6 flex-1 flex flex-col min-h-0">
+                  <div className="flex items-center justify-between mb-4 border-b border-gray-800 pb-2 shrink-0">
+                    <span className="text-[#8B5CF6] font-bold flex items-center gap-2">
+                      <MessageSquare size={16} /> Interview Chat
+                    </span>
+                    <span className="text-xs text-gray-500 font-mono">
+                      Q{questionCount}
+                    </span>
+                  </div>
+
+                  <div
+                    ref={chatScrollContainerRef}
+                    className="flex-1 overflow-y-auto space-y-4 pr-2"
+                  >
+                    {chatLog.map((msg, i) => (
+                      <div
+                        key={i}
+                        className={`flex flex-col ${msg.sender === "You" ? "items-end" : "items-start"}`}
+                      >
+                        <span className="text-[11px] text-gray-500 mb-1 px-1">
+                          {msg.sender}
+                        </span>
+                        <div
+                          className={`p-3.5 rounded-xl text-sm leading-relaxed max-w-[85%] ${msg.sender === "You" ? "bg-[#8B5CF6] text-white rounded-tr-none" : "bg-[#0F111A] border border-gray-800 text-gray-200 rounded-tl-none"}`}
+                        >
+                          {msg.text}
+                        </div>
+                      </div>
+                    ))}
+                    {isAiThinking && (
+                      <div className="flex flex-col items-start">
+                        <span className="text-[11px] text-gray-500 mb-1 px-1">
+                          Mia
+                        </span>
+                        <div className="p-3.5 rounded-xl bg-[#0F111A] border border-gray-800 rounded-tl-none flex gap-1.5">
+                          <span className="w-1.5 h-1.5 bg-[#8B5CF6] rounded-full animate-bounce"></span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-[#1A1D27] rounded-xl border border-gray-800 p-6 h-48 flex flex-col shrink-0">
+                  <div className="flex justify-between items-center mb-3">
+                    <span className="text-gray-400 font-bold text-sm flex items-center gap-2">
+                      <Mic size={14} /> Live Transcript
+                    </span>
                     <span
-                      className={
-                        questionTimeLeft < 10
-                          ? "text-red-400 animate-pulse"
-                          : "text-gray-400"
-                      }
+                      className={`text-xs font-mono ${questionTimeLeft < 10 ? "text-red-400" : "text-gray-500"}`}
                     >
                       00:{questionTimeLeft.toString().padStart(2, "0")}
                     </span>
                   </div>
+                  <div className="flex-1 bg-[#0F111A] border border-gray-800 rounded-lg p-4 overflow-y-auto">
+                    <p className="text-gray-300 text-sm">
+                      {liveTranscript ||
+                        (isListening ? (
+                          <span className="text-gray-600 italic">
+                            Speak now...
+                          </span>
+                        ) : (
+                          <span className="text-gray-600 italic">
+                            Mic muted.
+                          </span>
+                        ))}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Column 3: 3 Insights */}
+              <div className="lg:col-span-3 bg-[#1A1D27] rounded-xl border border-gray-800 p-6 flex flex-col h-full min-h-0">
+                <div className="flex justify-between items-center mb-6 shrink-0">
+                  <h3 className="font-bold text-white">Live Insights</h3>
+                  <span className="text-xs font-mono text-[#8B5CF6]">
+                    {formatTime(durationLimit * 60 - overallTimeLeft)}
+                  </span>
                 </div>
 
-                <div
-                  ref={chatScrollContainerRef}
-                  className="flex-1 overflow-y-auto space-y-4 py-4 pr-2"
-                >
-                  {chatLog.map((msg, i) => (
-                    <div
-                      key={i}
-                      className={`flex flex-col ${msg.sender === "You" ? "items-end" : "items-start"}`}
-                    >
-                      <span className="text-[11px] text-[#9CA3AF] mb-1 px-1">
-                        {msg.sender}
-                      </span>
+                <div className="space-y-8 flex-1 overflow-y-auto pr-2">
+                  <div>
+                    <div className="flex justify-between text-sm mb-1">
+                      <span className="text-gray-400">Speaking Pace</span>
+                      <span className="text-white font-bold">{wpm} WPM</span>
+                    </div>
+                    <div className="h-1.5 bg-gray-800 rounded-full mt-2">
                       <div
-                        className={`p-3.5 rounded-xl text-sm leading-relaxed max-w-[85%] ${msg.sender === "You" ? "bg-[#8B5CF6] text-white rounded-tr-none" : "bg-[#0F111A] border border-gray-800 text-gray-200 rounded-tl-none"}`}
-                      >
-                        {msg.text}
-                      </div>
+                        className="h-full bg-[#8B5CF6]"
+                        style={{ width: `${Math.min(wpm / 2, 100)}%` }}
+                      ></div>
                     </div>
-                  ))}
-                  {isAiThinking && (
-                    <div className="flex flex-col items-start">
-                      <span className="text-[11px] text-[#9CA3AF] mb-1 px-1">
-                        Mia
-                      </span>
-                      <div className="p-3.5 rounded-xl bg-[#0F111A] border border-gray-800 text-gray-400 rounded-tl-none flex gap-1.5 items-center">
-                        <span className="w-1.5 h-1.5 bg-[#8B5CF6] rounded-full animate-bounce"></span>
-                        <span className="w-1.5 h-1.5 bg-[#8B5CF6] rounded-full animate-bounce delay-100"></span>
-                        <span className="w-1.5 h-1.5 bg-[#8B5CF6] rounded-full animate-bounce delay-200"></span>
-                      </div>
-                    </div>
-                  )}
-                </div>
+                  </div>
 
-                <div className="pt-4 border-t border-gray-800 flex justify-center gap-6 shrink-0">
-                  <button
-                    onClick={() =>
-                      isListening
-                        ? recognitionRef.current?.stop()
-                        : recognitionRef.current?.start()
-                    }
-                    className={`w-14 h-14 rounded-full flex items-center justify-center transition-all ${isListening ? "bg-red-500 animate-pulse shadow-[0_0_15px_rgba(239,68,68,0.4)]" : "bg-[#8B5CF6] hover:bg-[#7C3AED]"}`}
-                  >
-                    {isListening ? <Mic size={24} /> : <MicOff size={24} />}
-                  </button>
-                  <button
-                    onClick={() => handleSkip("User manually skipped.")}
-                    disabled={!isListening}
-                    className={`w-14 h-14 rounded-full flex items-center justify-center transition-all ${!isListening ? "bg-gray-800 opacity-50 cursor-not-allowed text-gray-500" : "bg-gray-800 hover:bg-gray-700 text-white"}`}
-                  >
-                    <SkipForward size={24} />
-                  </button>
+                  <div>
+                    <div className="flex justify-between text-sm mb-1">
+                      <span className="text-gray-400">Filler Words</span>
+                      <span className="text-white font-bold">
+                        {fillerWordCount}
+                      </span>
+                    </div>
+                    <div className="h-1.5 bg-gray-800 rounded-full mt-2">
+                      <div
+                        className="h-full bg-amber-500"
+                        style={{
+                          width: `${Math.min(fillerWordCount * 5, 100)}%`,
+                        }}
+                      ></div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-sm mb-1">
+                      <span className="text-gray-400">Avg Speech Delay</span>
+                      <span className="text-white font-bold">
+                        {avgDelay.toFixed(1)}s
+                      </span>
+                    </div>
+                    <div className="h-1.5 bg-gray-800 rounded-full mt-2">
+                      <div
+                        className="h-full bg-red-500"
+                        style={{ width: `${Math.min(avgDelay * 10, 100)}%` }}
+                      ></div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -510,34 +599,62 @@ export default function InterviewPage() {
 
           {/* SUMMARY STATE */}
           {interviewState === "summary" && (
-            <div className="h-full flex flex-col items-center justify-center max-w-3xl mx-auto text-center space-y-6">
+            <div className="h-full flex flex-col items-center justify-center max-w-4xl mx-auto space-y-6 w-full">
               {!summaryData ? (
                 <div className="flex flex-col items-center gap-4">
                   <div className="w-16 h-16 border-4 border-[#8B5CF6] border-t-transparent rounded-full animate-spin"></div>
                   <h2 className="text-xl font-bold text-[#8B5CF6]">
-                    Mia is grading your interview...
+                    Generating Final Reality Check...
                   </h2>
-                  <p className="text-[#9CA3AF]">
-                    Analyzing technical depth, filler words, and body language.
-                  </p>
                 </div>
               ) : (
-                <div className="bg-[#1A1D27] rounded-xl border border-gray-800 p-8 w-full text-left overflow-y-auto max-h-full">
-                  <div className="flex items-center gap-3 mb-6 border-b border-gray-800 pb-4">
-                    <CheckCircle className="text-green-400 w-8 h-8" />
-                    <h2 className="text-2xl font-bold">Performance Report</h2>
+                <div className="bg-[#1A1D27] rounded-xl border border-gray-800 p-8 w-full">
+                  <div className="flex items-center justify-between mb-8 border-b border-gray-800 pb-6">
+                    <div className="flex items-center gap-3">
+                      <CheckCircle className="text-[#8B5CF6] w-8 h-8" />
+                      <h2 className="text-3xl font-bold">Interview Graded</h2>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm text-gray-400">Overall Score</p>
+                      <p
+                        className={`text-4xl font-black ${summaryData.overallScore >= 70 ? "text-green-400" : "text-red-400"}`}
+                      >
+                        {summaryData.overallScore}/100
+                      </p>
+                    </div>
                   </div>
-                  <div className="prose prose-invert max-w-none text-gray-300">
-                    {/* Render the markdown summary directly from the AI */}
-                    <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed bg-[#0F111A] p-6 rounded-lg border border-gray-800">
-                      {summaryData}
-                    </pre>
+
+                  <div className="space-y-6 mb-8">
+                    <div>
+                      <h3 className="font-bold text-white mb-2">
+                        Technical Correctness
+                      </h3>
+                      <p className="text-sm text-gray-300 bg-[#0F111A] p-4 rounded-lg border border-gray-800 leading-relaxed">
+                        {summaryData.technicalFeedback}
+                      </p>
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-white mb-2">
+                        Body Language & Telemetry
+                      </h3>
+                      <p className="text-sm text-gray-300 bg-[#0F111A] p-4 rounded-lg border border-gray-800 leading-relaxed">
+                        {summaryData.behavioralFeedback}
+                      </p>
+                    </div>
                   </div>
+
+                  <div className="mb-8">
+                    <h3 className="font-bold text-white mb-3">Reality Check</h3>
+                    <p className="text-sm text-white leading-relaxed border-l-4 border-red-500 pl-4 bg-red-500/10 p-4 rounded-r-lg italic font-medium">
+                      "{summaryData.realityCheck}"
+                    </p>
+                  </div>
+
                   <button
                     onClick={() => window.location.reload()}
-                    className="mt-8 px-6 py-3 bg-[#8B5CF6] hover:bg-[#7C3AED] rounded-lg font-bold w-full"
+                    className="w-full py-4 bg-[#8B5CF6] hover:bg-[#7C3AED] rounded-xl font-bold"
                   >
-                    Start New Interview
+                    Start Another Session
                   </button>
                 </div>
               )}

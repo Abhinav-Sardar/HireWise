@@ -4,7 +4,7 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 export async function POST(req) {
   try {
-    const { history, userMessage, mode } = await req.json();
+    const { history, userMessage, mode, metrics } = await req.json();
 
     const validHistory = history
       .filter((msg, index) => !(index === 0 && msg.sender === "Mia"))
@@ -13,29 +13,43 @@ export async function POST(req) {
         content: msg.text,
       }));
 
-    // Mode 1: Final Analytical Summary
+    // Mode 1: Brutal Analytical Grading
     if (mode === "summarize") {
       const summaryCompletion = await groq.chat.completions.create({
         messages: [
           {
             role: "system",
-            content:
-              "You are Mia, a Senior SWE Interviewer. The interview has ended. Analyze the user's answers and generate a brutally honest performance report. Call out specific gaps in their knowledge, give a hardcore reality check, and provide a final score out of 10. Format this nicely using markdown.",
+            content: `You are Mia, a Senior SWE Interviewer grading a candidate. 
+              Do NOT sugarcoat. Call out every mistake, hesitation, and gap in their technical knowledge. 
+              Evaluate their answers for technical correctness.
+              You are provided with their behavioral telemetry: ${JSON.stringify(metrics)}. Use this data to criticize their communication and body language.
+              
+              Return a JSON object strictly matching this format:
+              {
+                "overallScore": <number 0-100>,
+                "technicalFeedback": "<brutally honest feedback on whether their answers were actually correct>",
+                "behavioralFeedback": "<critique their filler words, speech delay, eye contact, and posture>",
+                "realityCheck": "<A 2-sentence hardcore summary calling out their biggest flaws>",
+                "strongTopics": ["topic1"],
+                "weakTopics": ["topic1"]
+              }`,
           },
           ...validHistory,
           {
             role: "user",
             content:
-              "The interview is over. Generate my final score and analytical summary.",
+              "The interview is over. Generate my final score and analytical JSON summary.",
           },
         ],
-        model: "llama-3.1-8b-instant",
-        temperature: 0.5,
+        model: "openai/gpt-oss-20b",
+        temperature: 0.2,
+        response_format: { type: "json_object" },
       });
-      return Response.json({
-        response:
-          summaryCompletion.choices[0]?.message?.content || "Summary failed.",
-      });
+
+      const gradingData = JSON.parse(
+        summaryCompletion.choices[0]?.message?.content || "{}",
+      );
+      return Response.json(gradingData);
     }
 
     // Mode 2: Active SWE Interview
@@ -45,13 +59,12 @@ export async function POST(req) {
       messages: [
         {
           role: "system",
-          content: `You are Mia, a senior Software Engineering (SWE) technical interviewer. 
+          content: `You are Mia, a senior Software Engineering technical interviewer. 
           Your style is brutally honest, highly critical, and direct. Absolutely no sugarcoating.
-          When the user answers:
-          1. Directly call out any mistakes or faltering. Give them a hardcore reality check if the answer is weak.
+          1. Directly call out any mistakes. Give a hardcore reality check if the answer is weak.
           2. Provide the foolproof, correct explanation covering all grounds briefly.
-          3. Ask the next SWE technical question (System Design, Algorithms, Backend).
-          Keep responses under 4 sentences to maintain rapid pacing.`,
+          3. Ask the next SWE technical question.
+          Keep responses under 4 sentences.`,
         },
         ...validHistory,
       ],
@@ -63,7 +76,7 @@ export async function POST(req) {
       response: chatCompletion.choices[0]?.message?.content || "",
     });
   } catch (error) {
-    console.error("Groq SDK Error:", error);
+    console.error("Groq Error:", error);
     return Response.json(
       { error: error.message || "Fatal error communicating with Groq." },
       { status: 500 },
