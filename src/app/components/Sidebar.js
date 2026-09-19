@@ -3,24 +3,6 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Home, Target, BarChart2, FileText } from "lucide-react";
 
-// Exporting the custom SVG so it can be reused in page headers
-export const HWLogo = ({ className = "w-8 h-8" }) => (
-  <svg
-    viewBox="0 0 40 40"
-    fill="none"
-    xmlns="http://www.w3.org/2000/svg"
-    className={className}
-  >
-    <path
-      d="M10 10V30M10 20H20M20 10V30L27 18L34 30V10"
-      stroke="#8B5CF6"
-      strokeWidth="4"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-  </svg>
-);
-
 export default function Sidebar() {
   const pathname = usePathname();
 
@@ -67,3 +49,17 @@ export default function Sidebar() {
     </aside>
   );
 }
+
+
+// components/Sidebar.jsx (Snippet)
+export const HWLogo = ({ className = "w-8 h-8", color = "#8B5CF6" }) => (
+  <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
+    <path 
+      d="M10 10V30M10 20H20M20 10V30L27 18L34 30V10" 
+      stroke={color} 
+      strokeWidth="4" 
+      strokeLinecap="round" 
+      strokeLinejoin="round"
+    />
+  </svg>
+)
